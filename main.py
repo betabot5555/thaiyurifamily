@@ -6,14 +6,16 @@ from pathlib import Path
 import requests
 from TikTokLive import TikTokLiveClient
 
-# ================= 配置區域 =================
 TG_TOKEN = os.getenv("TG_TOKEN")
 CHAT_ID = os.getenv("TG_CHAT_ID")
 
-TIKTOK_TARGETS = ["user1", "user2", "user3"]
+TIKTOK_TARGETS = [
+    "user1",
+    "user2",
+    "user3"
+]
 
 STATE_FILE = Path("monitor_state.json")
-# ===========================================
 
 
 def load_state():
@@ -100,11 +102,9 @@ def run_tiktok_logic(state):
 
 def main():
     print("--- 啟動自動化巡邏 ---")
-
     state = load_state()
     run_tiktok_logic(state)
     save_state(state)
-
     print("--- 巡邏結束 ---")
 
 
