@@ -1,0 +1,29 @@
+name: Social Media Monitor
+
+on:
+  schedule:
+    - cron: '0 * * * *' # 先設定每小時整點跑一次，方便測試
+  workflow_dispatch:      # 讓你可以手動點擊「按鈕」立刻執行
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 複製代碼
+        uses: actions/checkout@v3
+
+      - name: 設定 Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 安裝套件
+        run: pip install -r requirements.txt
+
+      - name: 執行監控
+        env:
+          IG_USERNAME: ${{ secrets.IG_USERNAME }}
+          IG_PASSWORD: ${{ secrets.IG_PASSWORD }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python main.py
