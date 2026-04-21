@@ -10,9 +10,10 @@ TG_TOKEN = os.getenv("TG_TOKEN")
 CHAT_ID = os.getenv("TG_CHAT_ID")
 
 TIKTOK_TARGETS = [
-    "user1",
-    "user2",
-    "user3"
+    "emiamily",
+    "beobonny",
+    "srchafreen",
+    "angelssbecky"
 ]
 
 STATE_FILE = Path("monitor_state.json")
