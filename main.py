@@ -1,88 +1,193 @@
 import os
-import time
+import json
 import requests
 import instaloader
+from pathlib import Path
+from datetime import datetime, timezone
 
-# ================= 配置區域 =================
-# 從 GitHub Secrets 讀取敏感資訊
-IG_USER = os.getenv('IG_USERNAME')
-IG_PW = os.getenv('IG_PASSWORD')
-TG_TOKEN = os.getenv('TG_TOKEN')
-CHAT_ID = os.getenv('TG_CHAT_ID')
+IG_USER = os.getenv("IG_USERNAME")
+IG_SESSION_FILE = os.getenv("IG_SESSION_FILE", "ig_session")
+TG_TOKEN = os.getenv("TG_TOKEN")
+CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# --- 填入你想監控的名單 ---
-TIKTOK_TARGETS = ["srchafreen", "angelssbecky", "emiamily", "beobonny"]  # TikTok 帳號名單
-IG_TARGETS = ["srchafreen", "angelssbecky", "emiamily", "beonnnie"]        # IG 帳號名單
-# ===========================================
+TIKTOK_TARGETS = ["srchafreen", "angelssbecky", "emiamily", "beobonny"]
+IG_TARGETS = ["srchafreen", "angelssbecky", "emiamily", "beonnnie"]
+STATE_FILE = Path("monitor_state.json")
+
+
+def load_state():
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "tiktok_live": {},
+        "ig_story_latest": {}
+    }
+
+
+def save_state(state):
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
 
 def send_tg(msg):
-    """發送訊息到 Telegram"""
+    if not TG_TOKEN or not CHAT_ID:
+        print("TG_TOKEN / TG_CHAT_ID 未設定")
+        return
+
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": msg}
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code != 200:
+            print(f"Telegram 發送失敗: {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"Telegram 發送失敗: {e}")
 
+
 def check_tiktok_live(username):
-    """檢查 TikTok 直播狀態"""
     url = f"https://www.tiktok.com/@{username}/live"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
     }
+
     try:
-        # allow_redirects=True 是為了追蹤直播間的跳轉
-        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-        # 檢查頁面源碼中是否包含直播關鍵字
-        if 'is_live":true' in response.text or '"status":2' in response.text:
-            return True
-        return False
+        r = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+        text = r.text
+
+        print(f"[TikTok] {username} status={r.status_code} final_url={r.url}")
+
+        live_markers = [
+            '"is_live":true',
+            '"status":2',
+            '"liveRoom"',
+            '"LIVE"',
+        ]
+
+        is_live = any(marker in text for marker in live_markers)
+
+        return {
+            "ok": True,
+            "is_live": is_live,
+            "status_code": r.status_code,
+            "final_url": r.url
+        }
+
     except Exception as e:
         print(f"TikTok 檢查 {username} 失敗: {e}")
-        return False
+        return {
+            "ok": False,
+            "is_live": False,
+            "error": str(e)
+        }
 
-def run_ig_logic():
-    """執行 IG 監控邏輯"""
-    if not IG_USER or not IG_PW:
-        print("未設定 IG 帳密，跳過 IG 檢查。")
+
+def init_instaloader():
+    L = instaloader.Instaloader(
+        download_pictures=False,
+        download_videos=False,
+        download_video_thumbnails=False,
+        save_metadata=False,
+        compress_json=False,
+        quiet=True,
+    )
+
+    if not IG_USER:
+        raise RuntimeError("未設定 IG_USERNAME")
+
+    # 建議預先把 session file 放到 repo runner 可讀位置
+    L.load_session_from_file(IG_USER, filename=IG_SESSION_FILE)
+    return L
+
+
+def check_ig_stories(L, target):
+    try:
+        profile = instaloader.Profile.from_username(L.context, target)
+        userids = [profile.userid]
+
+        stories = L.get_stories(userids=userids)
+        latest_ts = None
+
+        for story in stories:
+            for item in story.get_items():
+                ts = int(item.date_utc.replace(tzinfo=timezone.utc).timestamp())
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+
+        return {
+            "ok": True,
+            "latest_ts": latest_ts
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
+
+
+def run_tiktok_logic(state):
+    for username in TIKTOK_TARGETS:
+        result = check_tiktok_live(username)
+
+        if not result["ok"]:
+            print(f"[TikTok] {username} check failed: {result.get('error')}")
+            continue
+
+        prev_live = state["tiktok_live"].get(username, False)
+        now_live = result["is_live"]
+
+        if now_live and not prev_live:
+            send_tg(f"🔴 TikTok {username} 正在直播！\nhttps://www.tiktok.com/@{username}/live")
+
+        state["tiktok_live"][username] = now_live
+
+
+def run_ig_logic(state):
+    try:
+        L = init_instaloader()
+    except Exception as e:
+        send_tg(f"❌ IG 初始化失敗：{str(e)[:150]}")
         return
 
-    L = instaloader.Instaloader()
-    try:
-        # 嘗試登入
-        L.login(IG_USER, IG_PW)
-        
-        for target in IG_TARGETS:
-            # 這裡目前只是「檢查連線」，之後可以加入下載 Story 的邏輯
-            profile = instaloader.Profile.from_username(L.context, target)
-            print(f"IG 帳號 {target} 連線成功，UserID: {profile.userid}")
-            # send_tg(f"📸 IG 監測中: {target} 連線正常")
-            
-    except Exception as e:
-        # 如果登入失敗（例如 Checkpoint），發送通知但程式不崩潰
-        error_msg = str(e)
-        if "Checkpoint" in error_msg:
-            send_tg(f"⚠️ IG 登入需要驗證 (Checkpoint)。請在手機按「這是我」或改用 Session 方式。")
+    for target in IG_TARGETS:
+        result = check_ig_stories(L, target)
+
+        if not result["ok"]:
+            err = result.get("error", "")
+            if "Checkpoint" in err:
+                send_tg("⚠️ IG session 失效，需要重新驗證 / 匯出 session。")
+            else:
+                print(f"[IG] {target} failed: {err}")
+            continue
+
+        latest_ts = result["latest_ts"]
+        prev_ts = state["ig_story_latest"].get(target)
+
+        if latest_ts is not None:
+            if prev_ts is not None and latest_ts > prev_ts:
+                dt = datetime.fromtimestamp(latest_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                send_tg(f"📸 IG {target} 有新 Story！最新時間：{dt}\nhttps://www.instagram.com/{target}/")
+            state["ig_story_latest"][target] = latest_ts
         else:
-            send_tg(f"❌ IG 檢查出錯: {error_msg[:100]}")
+            print(f"[IG] {target} 目前冇 story")
+
 
 def main():
-    print("--- 啟動自動化巡邏 ---")
-    
-    # 1. 檢查 TikTok 列表
-    print(f"正在巡邏 TikTok 名單: {TIKTOK_TARGETS}")
-    for tt_user in TIKTOK_TARGETS:
-        if check_tiktok_live(tt_user):
-            send_tg(f"🔴 報告！TikTok 帳號 {tt_user} 正在直播！\n傳送門: https://www.tiktok.com/@{tt_user}/live")
-        else:
-            print(f"DEBUG: TikTok {tt_user} 沒開台")
-        time.sleep(2) # 禮貌休息
-    
-    # 2. 檢查 IG 列表
-    print(f"正在巡邏 IG 名單: {IG_TARGETS}")
-    run_ig_logic()
+    print("--- 啟動巡邏 ---")
+    state = load_state()
 
+    run_tiktok_logic(state)
+    run_ig_logic(state)
+
+    save_state(state)
     print("--- 巡邏結束 ---")
+
 
 if __name__ == "__main__":
     main()
